@@ -8,7 +8,8 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/messagehandler"
+	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/middleware"
+	"github.com/7574-sistemas-distribuidos/tp-coordinacion/messagehandler"
 )
 
 type ConnectionConfig struct {
@@ -53,7 +54,9 @@ func main() {
 		log.Println("While readding rabbitmq host and ports", err)
 		return
 	}
-	go outputQueue.StartConsuming(handleClientResponse)
+	go outputQueue.StartConsuming(func(msg middleware.Message, ack, nack func()) {
+		handleClientResponse(outputQueue, msg, ack, nack)
+	})
 
 	config, err := loadConnectionConfig()
 	if err != nil {
