@@ -1,5 +1,6 @@
 import os
 import logging
+import signal
 
 from common import middleware, message_protocol, fruit_item
 
@@ -23,25 +24,79 @@ class JoinFilter:
             MOM_HOST, OUTPUT_QUEUE
         )
 
-    def process_messsage(self, message, ack, nack):
+        self.partial_top_by_query = {}
+
+    def _process_partial_top(self, query_id, sender_aggregation_id, partial_top):
+        logging.info(f"Processing partial top message for query {query_id} from aggregation {sender_aggregation_id}")
+
+        if query_id not in self.partial_top_by_query:
+            self.partial_top_by_query[query_id] = {}
+
+        self.partial_top_by_query[query_id][sender_aggregation_id] = partial_top
+
+        if len(self.partial_top_by_query[query_id]) < AGGREGATION_AMOUNT:
+            return
+        
+        total = []
+        for top in self.partial_top_by_query[query_id].values():
+            total.extend(top)
+        
+        final_top = sorted(total, key=lambda x: x[1], reverse=True)[:TOP_SIZE]
+
+        self.output_queue.send(message_protocol.internal.serialize({
+            'query_id': query_id,
+            'data': final_top
+        }))
+
+        del self.partial_top_by_query[query_id]
+
+    def process_message(self, message, ack, nack):
         logging.info("Received top")
 
         try:
             deserialized_message = message_protocol.internal.deserialize(message)
+            query_id = deserialized_message['query_id']
+            sender_aggregation_id = deserialized_message['sender_aggregation_id']
+            partial_top = deserialized_message['data']
 
-            self.output_queue.send(message_protocol.internal.serialize(deserialized_message))
+            self._process_partial_top(query_id, sender_aggregation_id, partial_top)
             ack()
+
         except Exception as e:
             logging.error(f"Error processing message: {str(e)}")
             nack()
+    
+    def shutdown(self):
+        logging.info("Shutting down join filter")
+
+        try:
+            self.input_queue.stop_consuming()
+        except Exception as e:
+            logging.error(f"Error stopping input queue consuming: {str(e)}")
+
+        try:
+            self.input_queue.close()
+        except Exception as e:
+            logging.error(f"Error closing input queue: {str(e)}")
+
+        try:
+            self.output_queue.close()
+        except Exception as e:
+            logging.error(f"Error closing output queue: {str(e)}")
 
     def start(self):
-        self.input_queue.start_consuming(self.process_messsage)
+        self.input_queue.start_consuming(self.process_message)
 
 
 def main():
     logging.basicConfig(level=logging.INFO)
     join_filter = JoinFilter()
+
+    signal.signal(
+        signal.SIGTERM,
+        lambda signum, frame: join_filter.shutdown()
+    )
+
     join_filter.start()
 
     return 0

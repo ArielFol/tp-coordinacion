@@ -1,6 +1,7 @@
 import os
 import logging
 import bisect
+import signal
 
 from common import middleware, message_protocol, fruit_item
 
@@ -56,7 +57,7 @@ class AggregationFilter:
         fruit_top = self.top_by_query.get(query_id, [])
         fruit_chunk = list(fruit_top[-TOP_SIZE:])
         fruit_chunk.reverse()
-        final_top = list(
+        partial_top = list(
             map(
                 lambda fruit_item: (fruit_item.fruit, fruit_item.amount),
                 fruit_chunk,
@@ -64,7 +65,8 @@ class AggregationFilter:
         )
         self.output_queue.send(message_protocol.internal.serialize({
             'query_id': query_id,
-            'data': final_top
+            'sender_aggregation_id': ID,
+            'data': partial_top
         }))
         self.top_by_query.pop(query_id, None)
         self.eofs_by_query.pop(query_id, None)
@@ -85,6 +87,24 @@ class AggregationFilter:
         except Exception as e:
             logging.error(f"Error processing message: {str(e)}")
             nack()
+    
+    def shutdown(self):
+        logging.info("Shutting down aggregation filter")
+
+        try:
+            self.input_exchange.stop_consuming()
+        except Exception as e:
+            logging.error(f"Error stopping input exchange consuming: {str(e)}")
+
+        try:
+            self.input_exchange.close()
+        except Exception as e:
+            logging.error(f"Error closing input exchange: {str(e)}")
+
+        try:
+            self.output_queue.close()
+        except Exception as e:
+            logging.error(f"Error closing output queue: {str(e)}")
 
     def start(self):
         self.input_exchange.start_consuming(self.process_messsage)
@@ -93,6 +113,12 @@ class AggregationFilter:
 def main():
     logging.basicConfig(level=logging.INFO)
     aggregation_filter = AggregationFilter()
+
+    signal.signal(
+        signal.SIGTERM,
+        lambda signum, frame: aggregation_filter.shutdown()
+    )
+
     aggregation_filter.start()
     return 0
 

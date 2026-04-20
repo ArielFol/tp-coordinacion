@@ -62,6 +62,12 @@ class SumFilter:
         
         self._try_close_query(query_id)
 
+    def _partition_key(self, fruit):
+        value = 0
+        for char in fruit:
+            value = value * 31 + ord(char)
+        return value % AGGREGATION_AMOUNT
+
     def _process_eof(self, query_id):
         logging.info(f"Broadcasting data messages")
 
@@ -73,13 +79,14 @@ class SumFilter:
 
         if query_fruits is not None:
             for final_fruit_item in query_fruits.values():
-                for data_output_exchange in self.data_output_exchanges:
-                    data_output_exchange.send(
-                        message_protocol.internal.serialize({
-                            'query_id': query_id,
-                            'data': [final_fruit_item.fruit, final_fruit_item.amount]
-                        })
-                    )
+                aggregation_target = self._partition_key(final_fruit_item.fruit)
+                target_exchange = self.data_output_exchanges[aggregation_target]
+                target_exchange.send(
+                    message_protocol.internal.serialize({
+                        'query_id': query_id,
+                        'data': [final_fruit_item.fruit, final_fruit_item.amount]
+                    })
+                )
         logging.info(f"Broadcasting EOF message")
         for data_output_exchange in self.data_output_exchanges:
             data_output_exchange.send(message_protocol.internal.serialize({
