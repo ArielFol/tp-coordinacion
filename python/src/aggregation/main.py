@@ -71,7 +71,7 @@ class AggregationFilter:
         self.top_by_query.pop(query_id, None)
         self.eofs_by_query.pop(query_id, None)
 
-    def process_messsage(self, message, ack, nack):
+    def process_message(self, message, ack, nack):
         logging.info("Process message")
         try:
             deserialized_message = message_protocol.internal.deserialize(message)
@@ -107,7 +107,7 @@ class AggregationFilter:
             logging.error(f"Error closing output queue: {str(e)}")
 
     def start(self):
-        self.input_exchange.start_consuming(self.process_messsage)
+        self.input_exchange.start_consuming(self.process_message)
 
 
 def main():
