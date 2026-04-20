@@ -24,35 +24,52 @@ class SumFilter:
                 MOM_HOST, AGGREGATION_PREFIX, [f"{AGGREGATION_PREFIX}_{i}"]
             )
             self.data_output_exchanges.append(data_output_exchange)
-        self.amount_by_fruit = {}
+        self.amount_by_query = {}
 
-    def _process_data(self, fruit, amount):
+    def _process_data(self, query_id, fruit, amount):
         logging.info(f"Process data")
-        self.amount_by_fruit[fruit] = self.amount_by_fruit.get(
+
+        if query_id not in self.amount_by_query:
+            self.amount_by_query[query_id] = {}
+        
+        query_fruits = self.amount_by_query[query_id]
+
+        query_fruits[fruit] = query_fruits.get(
             fruit, fruit_item.FruitItem(fruit, 0)
         ) + fruit_item.FruitItem(fruit, int(amount))
 
-    def _process_eof(self):
+    def _process_eof(self, query_id):
         logging.info(f"Broadcasting data messages")
-        for final_fruit_item in self.amount_by_fruit.values():
+
+        query_fruits = self.amount_by_query.get(query_id, {})
+
+        for final_fruit_item in query_fruits.values():
             for data_output_exchange in self.data_output_exchanges:
                 data_output_exchange.send(
-                    message_protocol.internal.serialize(
-                        [final_fruit_item.fruit, final_fruit_item.amount]
-                    )
+                    message_protocol.internal.serialize({
+                        'query_id': query_id,
+                        'data': [final_fruit_item.fruit, final_fruit_item.amount]
+                    })
                 )
 
         logging.info(f"Broadcasting EOF message")
         for data_output_exchange in self.data_output_exchanges:
-            data_output_exchange.send(message_protocol.internal.serialize([]))
+            data_output_exchange.send(message_protocol.internal.serialize({
+                'query_id': query_id,
+                'data': []
+            }))
+        del self.amount_by_query[query_id]
 
 
     def process_data_messsage(self, message, ack, nack):
-        fields = message_protocol.internal.deserialize(message)
-        if len(fields) == 2:
-            self._process_data(*fields)
+        deserialized_message = message_protocol.internal.deserialize(message)
+
+        query_id = deserialized_message["query_id"]
+        data = deserialized_message["data"]
+        if len(data) == 2:
+            self._process_data(query_id,*data)
         else:
-            self._process_eof(*fields)
+            self._process_eof(query_id, *data)
         ack()
 
     def start(self):

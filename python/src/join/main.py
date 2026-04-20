@@ -25,9 +25,15 @@ class JoinFilter:
 
     def process_messsage(self, message, ack, nack):
         logging.info("Received top")
-        fruit_top = message_protocol.internal.deserialize(message)
-        self.output_queue.send(message_protocol.internal.serialize(fruit_top))
-        ack()
+
+        try:
+            deserialized_message = message_protocol.internal.deserialize(message)
+
+            self.output_queue.send(message_protocol.internal.serialize(deserialized_message))
+            ack()
+        except Exception as e:
+            logging.error(f"Error processing message: {str(e)}")
+            nack()
 
     def start(self):
         self.input_queue.start_consuming(self.process_messsage)

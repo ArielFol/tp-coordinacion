@@ -23,39 +23,56 @@ class AggregationFilter:
         self.output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, OUTPUT_QUEUE
         )
-        self.fruit_top = []
+        self.top_by_query = {}
 
-    def _process_data(self, fruit, amount):
+    def _process_data(self, query_id, fruit, amount):
         logging.info("Processing data message")
-        for i in range(len(self.fruit_top)):
-            if self.fruit_top[i].fruit == fruit:
-                self.fruit_top[i] = self.fruit_top[i] + fruit_item.FruitItem(
+
+        if query_id not in self.top_by_query:
+            self.top_by_query[query_id] = []
+
+        fruit_top = self.top_by_query[query_id]
+
+        for i in range(len(fruit_top)):
+            if fruit_top[i].fruit == fruit:
+                fruit_top[i] = fruit_top[i] + fruit_item.FruitItem(
                     fruit, amount
                 )
                 return
-        bisect.insort(self.fruit_top, fruit_item.FruitItem(fruit, amount))
+        bisect.insort(fruit_top, fruit_item.FruitItem(fruit, amount))
 
-    def _process_eof(self):
-        logging.info("Received EOF")
-        fruit_chunk = list(self.fruit_top[-TOP_SIZE:])
+    def _process_eof(self, query_id):
+        logging.info(f"Received EOF for query {query_id}")
+        fruit_top = self.top_by_query.get(query_id)
+        fruit_chunk = list(fruit_top[-TOP_SIZE:])
         fruit_chunk.reverse()
-        fruit_top = list(
+        final_top = list(
             map(
                 lambda fruit_item: (fruit_item.fruit, fruit_item.amount),
                 fruit_chunk,
             )
         )
-        self.output_queue.send(message_protocol.internal.serialize(fruit_top))
-        del self.fruit_top
+        self.output_queue.send(message_protocol.internal.serialize({
+            'query_id': query_id,
+            'data': final_top
+        }))
+        del self.top_by_query[query_id]
 
     def process_messsage(self, message, ack, nack):
         logging.info("Process message")
-        fields = message_protocol.internal.deserialize(message)
-        if len(fields) == 2:
-            self._process_data(*fields)
-        else:
-            self._process_eof()
-        ack()
+        try:
+            deserialized_message = message_protocol.internal.deserialize(message)
+            query_id = deserialized_message["query_id"]
+            data = deserialized_message["data"]
+
+            if len(data) == 2:
+                self._process_data(query_id, *data)
+            else:
+                self._process_eof(query_id)
+            ack()
+        except Exception as e:
+            logging.error(f"Error processing message: {str(e)}")
+            nack()
 
     def start(self):
         self.input_exchange.start_consuming(self.process_messsage)
