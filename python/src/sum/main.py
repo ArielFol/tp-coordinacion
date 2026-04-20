@@ -1,5 +1,7 @@
 import os
 import logging
+import signal
+import sys
 import threading
 
 from common import middleware, message_protocol, fruit_item
@@ -37,6 +39,8 @@ class SumFilter:
                 MOM_HOST, AGGREGATION_PREFIX, [f"{AGGREGATION_PREFIX}_{i}"]
             )
             self.data_output_exchanges.append(data_output_exchange)
+
+        self.control_thread = None
 
         self.amount_by_query = {}
         self.closed_queries = set()
@@ -139,19 +143,57 @@ class SumFilter:
             logging.error(f"Error processing message: {str(e)}")
             nack()
 
+    def shutdown(self):
+        logging.info("SIGTERM received, shutting down")
+        
+        try:
+            self.input_queue.stop_consuming()
+        except Exception as e:
+            logging.error(f"Error stopping input queue consuming: {str(e)}")
+        
+        try:
+            self.control_exchange.stop_consuming()
+        except Exception as e:
+            logging.error(f"Error stopping control exchange consuming: {str(e)}")
+
+        if self.control_thread and self.control_thread.is_alive():
+            self.control_thread.join(timeout=2)
+
+        try:
+            self.input_queue.close()
+        except Exception as e:
+            logging.error(f"Error closing input queue: {str(e)}")
+
+        try:
+            self.control_exchange.close()
+        except Exception as e:
+                logging.error(f"Error closing control exchange: {str(e)}")
+
+        try:
+            self.control_output.close()
+        except Exception as e:
+            logging.error(f"Error closing control output: {str(e)}")
+
+        for exchange in self.data_output_exchanges:
+            try:
+                exchange.close()
+            except Exception as e:
+                logging.error(f"Error closing data output exchange: {str(e)}")
+
 
     def start(self):
-        control_thread = threading.Thread(
+        self.control_thread = threading.Thread(
             target = lambda: self.control_exchange.start_consuming(self.process_control_message),
             daemon = True
         )
 
-        control_thread.start()
+        self.control_thread.start()
         self.input_queue.start_consuming(self.process_data_message)
 
 def main():
     logging.basicConfig(level=logging.INFO)
     sum_filter = SumFilter()
+    signal.signal(signal.SIGTERM, lambda signum, frame: sum_filter.shutdown())
     sum_filter.start()
     return 0
 
