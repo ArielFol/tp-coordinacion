@@ -24,6 +24,7 @@ class AggregationFilter:
             MOM_HOST, OUTPUT_QUEUE
         )
         self.top_by_query = {}
+        self.eofs_by_query = {}
 
     def _process_data(self, query_id, fruit, amount):
         logging.info("Processing data message")
@@ -35,15 +36,24 @@ class AggregationFilter:
 
         for i in range(len(fruit_top)):
             if fruit_top[i].fruit == fruit:
-                fruit_top[i] = fruit_top[i] + fruit_item.FruitItem(
-                    fruit, amount
-                )
+                updated = fruit_top.pop(i) + fruit_item.FruitItem(fruit, amount)
+                bisect.insort(fruit_top, updated)
                 return
         bisect.insort(fruit_top, fruit_item.FruitItem(fruit, amount))
 
-    def _process_eof(self, query_id):
+    def _process_eof(self, query_id, sender_sum_id):
         logging.info(f"Received EOF for query {query_id}")
-        fruit_top = self.top_by_query.get(query_id)
+        
+        if query_id not in self.eofs_by_query:
+            self.eofs_by_query[query_id] = set()
+        
+        self.eofs_by_query[query_id].add(sender_sum_id)
+        eof_count = len(self.eofs_by_query[query_id])
+
+        if eof_count < SUM_AMOUNT:
+            return
+        
+        fruit_top = self.top_by_query.get(query_id, [])
         fruit_chunk = list(fruit_top[-TOP_SIZE:])
         fruit_chunk.reverse()
         final_top = list(
@@ -56,7 +66,8 @@ class AggregationFilter:
             'query_id': query_id,
             'data': final_top
         }))
-        del self.top_by_query[query_id]
+        self.top_by_query.pop(query_id, None)
+        self.eofs_by_query.pop(query_id, None)
 
     def process_messsage(self, message, ack, nack):
         logging.info("Process message")
@@ -68,7 +79,8 @@ class AggregationFilter:
             if len(data) == 2:
                 self._process_data(query_id, *data)
             else:
-                self._process_eof(query_id)
+                sender_sum_id = deserialized_message.get("sender_sum_id")
+                self._process_eof(query_id, sender_sum_id)
             ack()
         except Exception as e:
             logging.error(f"Error processing message: {str(e)}")
