@@ -46,21 +46,28 @@ class SumFilter:
         self.closed_queries = set()
         self.notified_queries = set()
         self.lock = threading.Lock()
+        self.registers_by_fruit_by_query = {}
 
     def _process_data(self, query_id, fruit, amount):
-        logging.info(f"Process data")
+        logging.info(f"Process data from query {query_id}")
 
         with self.lock:
             if query_id not in self.amount_by_query:
                 self.amount_by_query[query_id] = {}
-            
+            if query_id not in self.registers_by_fruit_by_query:
+                self.registers_by_fruit_by_query[query_id] = {}
+            if fruit not in self.registers_by_fruit_by_query[query_id]:
+                self.registers_by_fruit_by_query[query_id][fruit] = 0
+
+            self.registers_by_fruit_by_query[query_id][fruit] += 1
             query_fruits = self.amount_by_query[query_id]
+            
 
             query_fruits[fruit] = query_fruits.get(
                 fruit, fruit_item.FruitItem(fruit, 0)
             ) + fruit_item.FruitItem(fruit, int(amount))
         
-        self._try_close_query(query_id)
+        self._try_close_query(query_id, None)
 
     def _partition_key(self, fruit):
         value = 0
@@ -68,15 +75,12 @@ class SumFilter:
             value = value * 31 + ord(char)
         return value % AGGREGATION_AMOUNT
 
-    def _process_eof(self, query_id):
-        logging.info(f"Broadcasting data messages")
-
+    def _process_eof(self, query_id, records_by_fruit):
+        
         with self.lock:
-            if query_id in self.notified_queries:
-                return
-            self.notified_queries.add(query_id)
             query_fruits = self.amount_by_query.pop(query_id, None)
-
+            query_records = self.registers_by_fruit_by_query.pop(query_id, None)  
+        logging.info(f"Broadcasting data messages to aggregations for query {query_id} with records by fruit {query_records}")
         if query_fruits is not None:
             for final_fruit_item in query_fruits.values():
                 aggregation_target = self._partition_key(final_fruit_item.fruit)
@@ -84,30 +88,38 @@ class SumFilter:
                 target_exchange.send(
                     message_protocol.internal.serialize({
                         'query_id': query_id,
+                        'records': query_records[final_fruit_item.fruit],
                         'data': [final_fruit_item.fruit, final_fruit_item.amount]
                     })
                 )
-        logging.info(f"Broadcasting EOF message")
+                logging.info(f"Sent data message for query {query_id} and fruit {final_fruit_item.fruit} with amount {final_fruit_item.amount} to aggregation {aggregation_target}")
+        
+        with self.lock:
+            if query_id in self.notified_queries:
+                return
+            self.notified_queries.add(query_id)
+
+        logging.info(f"Broadcasting EOF message to aggregations for query {query_id}")
         for data_output_exchange in self.data_output_exchanges:
             data_output_exchange.send(message_protocol.internal.serialize({
                 'query_id': query_id,
                 'sender_sum_id': ID,
+                'records_by_fruit': records_by_fruit,
                 'data': []
             }))
-        
-        with self.lock:
-            self.closed_queries.discard(query_id)
-            self.notified_queries.discard(query_id)
 
-    def _broadcast_eof_to_sums(self, query_id):
+              
+
+    def _broadcast_eof_to_sums(self, query_id, records_by_fruit):
         logging.info(f"Broadcasting EOF to sums for query {query_id}")
 
         self.control_output.send(message_protocol.internal.serialize({
             'query_id': query_id,
+            'records_by_fruit': records_by_fruit,
             'data': []
         }))
     
-    def _receive_eof(self, query_id):
+    def _receive_eof(self, query_id, records_by_fruit):
         logging.info(f"Received EOF for query {query_id}")
 
         with self.lock:
@@ -117,18 +129,32 @@ class SumFilter:
         
             self.closed_queries.add(query_id)
         
-        self._try_close_query(query_id)
+        self._try_close_query(query_id, records_by_fruit)
 
-    def _try_close_query(self, query_id):
+    def _try_close_query(self, query_id, records_by_fruit):
         with self.lock:
             if query_id not in self.closed_queries:
+                logging.info(f"Query {query_id} is not closed yet, cannot try to close")
                 return
-        self._process_eof(query_id)
+        self._process_eof(query_id, records_by_fruit)
+    
+    def _cleanup_query(self, query_id):
+        logging.info(f"Cleaning up query {query_id}")
+
+        with self.lock:
+            self.closed_queries.discard(query_id)
+            self.notified_queries.discard(query_id)
+            self.amount_by_query.pop(query_id, None)
 
     def process_control_message(self, message, ack, nack):
         try:
             msg = message_protocol.internal.deserialize(message)
-            self._receive_eof(msg["query_id"])
+            if msg.get("command") == "cleanup":
+                self._cleanup_query(msg["query_id"])
+            else:
+                logging.info(f"[{threading.current_thread().name}] Received EOF {msg['query_id']}")
+                records_by_fruit = msg.get("records_by_fruit")
+                self._receive_eof(msg["query_id"], records_by_fruit)
             ack()
         except Exception as e:
             logging.error(f"Error processing control message: {str(e)}")
@@ -143,8 +169,10 @@ class SumFilter:
             if len(data) == 2:
                 self._process_data(query_id,*data)
             else:
-                self._broadcast_eof_to_sums(query_id)
-                self._receive_eof(query_id)
+                logging.info(f"[{threading.current_thread().name}] Received EOF {query_id}")
+                records_by_fruit = deserialized_message["records_by_fruit"]
+                self._broadcast_eof_to_sums(query_id, records_by_fruit)
+                self._receive_eof(query_id, records_by_fruit)
             ack()
         except Exception as e:
             logging.error(f"Error processing message: {str(e)}")
@@ -152,6 +180,7 @@ class SumFilter:
 
     def shutdown(self):
         logging.info("SIGTERM received, shutting down")
+
         
         try:
             self.input_queue.stop_consuming()
@@ -163,29 +192,6 @@ class SumFilter:
         except Exception as e:
             logging.error(f"Error stopping control exchange consuming: {str(e)}")
 
-        if self.control_thread and self.control_thread.is_alive():
-            self.control_thread.join(timeout=2)
-
-        try:
-            self.input_queue.close()
-        except Exception as e:
-            logging.error(f"Error closing input queue: {str(e)}")
-
-        try:
-            self.control_exchange.close()
-        except Exception as e:
-                logging.error(f"Error closing control exchange: {str(e)}")
-
-        try:
-            self.control_output.close()
-        except Exception as e:
-            logging.error(f"Error closing control output: {str(e)}")
-
-        for exchange in self.data_output_exchanges:
-            try:
-                exchange.close()
-            except Exception as e:
-                logging.error(f"Error closing data output exchange: {str(e)}")
 
 
     def start(self):
@@ -195,7 +201,33 @@ class SumFilter:
         )
 
         self.control_thread.start()
-        self.input_queue.start_consuming(self.process_data_message)
+
+        try:
+            self.input_queue.start_consuming(self.process_data_message)
+        finally:
+            if self.control_thread and self.control_thread.is_alive():
+                self.control_thread.join()
+
+            try:
+                self.input_queue.close()
+            except Exception as e:
+                logging.error(f"Error closing input queue: {str(e)}")
+
+            try:
+                self.control_exchange.close()
+            except Exception as e:
+                    logging.error(f"Error closing control exchange: {str(e)}")
+
+            try:
+                self.control_output.close()
+            except Exception as e:
+                logging.error(f"Error closing control output: {str(e)}")
+
+            for exchange in self.data_output_exchanges:
+                try:
+                    exchange.close()
+                except Exception as e:
+                    logging.error(f"Error closing data output exchange: {str(e)}")
 
 def main():
     logging.basicConfig(level=logging.INFO)

@@ -9,6 +9,7 @@ INPUT_QUEUE = os.environ["INPUT_QUEUE"]
 OUTPUT_QUEUE = os.environ["OUTPUT_QUEUE"]
 SUM_AMOUNT = int(os.environ["SUM_AMOUNT"])
 SUM_PREFIX = os.environ["SUM_PREFIX"]
+SUM_CONTROL_EXCHANGE = "SUM_CONTROL_EXCHANGE"
 AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
 AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
 TOP_SIZE = int(os.environ["TOP_SIZE"])
@@ -23,6 +24,11 @@ class JoinFilter:
         self.output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, OUTPUT_QUEUE
         )
+        self.control_output = middleware.MessageMiddlewareExchangeRabbitMQ(
+            MOM_HOST,
+            SUM_CONTROL_EXCHANGE,
+            [f"{SUM_PREFIX}_{i}" for i in range(SUM_AMOUNT)]
+         )
 
         self.partial_top_by_query = {}
 
@@ -43,9 +49,17 @@ class JoinFilter:
         
         final_top = sorted(total, key=lambda x: x[1], reverse=True)[:TOP_SIZE]
 
+        logging.info(f"Sending final top for query {query_id}")
         self.output_queue.send(message_protocol.internal.serialize({
             'query_id': query_id,
             'data': final_top
+        }))
+
+
+        self.control_output.send(message_protocol.internal.serialize({
+            'query_id': query_id,
+            'command': 'cleanup',
+            'data': []
         }))
 
         del self.partial_top_by_query[query_id]
@@ -74,18 +88,27 @@ class JoinFilter:
         except Exception as e:
             logging.error(f"Error stopping input queue consuming: {str(e)}")
 
-        try:
-            self.input_queue.close()
-        except Exception as e:
-            logging.error(f"Error closing input queue: {str(e)}")
-
-        try:
-            self.output_queue.close()
-        except Exception as e:
-            logging.error(f"Error closing output queue: {str(e)}")
-
     def start(self):
-        self.input_queue.start_consuming(self.process_message)
+        try:
+            self.input_queue.start_consuming(self.process_message)
+        except Exception as e:
+            logging.error(f"Error starting input queue consuming: {str(e)}")
+        finally:
+            try:
+                self.input_queue.close()
+            except Exception as e:
+                logging.error(f"Error closing input queue: {str(e)}")
+
+            try:
+                self.control_output.close()
+            except Exception as e:
+                logging.error(f"Error closing control output: {str(e)}")
+
+            try:
+                self.output_queue.close()
+            except Exception as e:
+                logging.error(f"Error closing output queue: {str(e)}")
+
 
 
 def main():
