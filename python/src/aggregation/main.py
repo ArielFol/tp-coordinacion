@@ -44,11 +44,9 @@ class AggregationFilter:
 
             received = self.received_records_by_fruit_by_query.get(query_id, {}).get(fruit, 0)
             if received < expected:
-                logging.debug(f"Not all records received for fruit {fruit} in query {query_id}, expected {expected} but received {received}")
                 return
 
         if eof_count < SUM_AMOUNT:
-            logging.debug(f"Not all EOFs received for query {query_id}, expected {SUM_AMOUNT} but received {eof_count}")
             return
         
         fruit_top = self.top_by_query.get(query_id, [])
@@ -84,7 +82,6 @@ class AggregationFilter:
         fruit_top = self.top_by_query[query_id]
 
         self.received_records_by_fruit_by_query[query_id][fruit] = self.received_records_by_fruit_by_query[query_id].get(fruit, 0) + records
-        logging.info(f"Received records for fruit {fruit} in query {query_id}, total received {self.received_records_by_fruit_by_query[query_id][fruit]} out of expected {self.total_records_by_fruit_by_query.get(query_id, {}).get(fruit, 'unknown')}")
         for i in range(len(fruit_top)):
             if fruit_top[i].fruit == fruit:
                 updated = fruit_top.pop(i) + fruit_item.FruitItem(fruit, amount)
@@ -98,7 +95,7 @@ class AggregationFilter:
             self._try_finalize(query_id)
 
     def _process_eof(self, query_id, sender_sum_id, records_by_fruit):
-        logging.info(f"Received EOF for query {query_id} from sum {sender_sum_id} with records by fruit {records_by_fruit}")
+        logging.info(f"Received EOF for query {query_id}")
         
         if query_id not in self.eofs_by_query:
             self.eofs_by_query[query_id] = set()

@@ -80,7 +80,7 @@ class SumFilter:
         with self.lock:
             query_fruits = self.amount_by_query.pop(query_id, None)
             query_records = self.registers_by_fruit_by_query.pop(query_id, None)  
-        logging.info(f"Broadcasting data messages to aggregations for query {query_id} with records by fruit {query_records}")
+        logging.info(f"Broadcasting data messages to aggregations for query {query_id}")
         if query_fruits is not None:
             for final_fruit_item in query_fruits.values():
                 aggregation_target = self._partition_key(final_fruit_item.fruit)
@@ -92,7 +92,6 @@ class SumFilter:
                         'data': [final_fruit_item.fruit, final_fruit_item.amount]
                     })
                 )
-                logging.info(f"Sent data message for query {query_id} and fruit {final_fruit_item.fruit} with amount {final_fruit_item.amount} to aggregation {aggregation_target}")
         
         with self.lock:
             if query_id in self.notified_queries:
@@ -134,7 +133,6 @@ class SumFilter:
     def _try_close_query(self, query_id, records_by_fruit):
         with self.lock:
             if query_id not in self.closed_queries:
-                logging.info(f"Query {query_id} is not closed yet, cannot try to close")
                 return
         self._process_eof(query_id, records_by_fruit)
     
@@ -152,7 +150,7 @@ class SumFilter:
             if msg.get("command") == "cleanup":
                 self._cleanup_query(msg["query_id"])
             else:
-                logging.info(f"[{threading.current_thread().name}] Received EOF {msg['query_id']}")
+                logging.info(f"Received EOF {msg['query_id']}")
                 records_by_fruit = msg.get("records_by_fruit")
                 self._receive_eof(msg["query_id"], records_by_fruit)
             ack()
@@ -169,7 +167,7 @@ class SumFilter:
             if len(data) == 2:
                 self._process_data(query_id,*data)
             else:
-                logging.info(f"[{threading.current_thread().name}] Received EOF {query_id}")
+                logging.info(f"Received EOF {query_id}")
                 records_by_fruit = deserialized_message["records_by_fruit"]
                 self._broadcast_eof_to_sums(query_id, records_by_fruit)
                 self._receive_eof(query_id, records_by_fruit)

@@ -11,7 +11,6 @@ class MessageHandler:
         self.records_by_fruit = {}
     
     def serialize_data_message(self, message):
-        logging.info(f"Serializing data message for query {self.query_id}, and fruit {message[0]} with amount {message[1]}")
         fruit, amount = message
         self.records_by_fruit[fruit] = self.records_by_fruit.get(fruit, 0) + 1
         return message_protocol.internal.serialize({

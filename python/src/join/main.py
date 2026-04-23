@@ -33,7 +33,7 @@ class JoinFilter:
         self.partial_top_by_query = {}
 
     def _process_partial_top(self, query_id, sender_aggregation_id, partial_top):
-        logging.info(f"Processing partial top message for query {query_id} from aggregation {sender_aggregation_id}")
+        logging.info(f"Processing partial top message for query {query_id}")
 
         if query_id not in self.partial_top_by_query:
             self.partial_top_by_query[query_id] = {}
