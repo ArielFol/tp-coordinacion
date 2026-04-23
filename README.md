@@ -79,3 +79,57 @@ Al momento de la evaluación y ejecución de las pruebas se **descartarán** o *
 - La implementación del protocolo de comunicación externo y `FruitItem`.
 
 Redactar un breve informe explicando el modo en que se coordinan las instancias de Sum y Aggregation, así como el modo en el que el sistema escala respecto a los clientes y a la cantidad de controles.
+
+## Informe
+
+Para la elaboración de este trabajo se fueron resolviendo progresivamente distintos desafíos en la coordinación del procesamiento distribuido.
+
+### Decisiones de diseño e Iteraciones
+
+#### Múltiples clientes:
+
+Para la coordinación de múltiples clientes, se agregó a cada message_handler un uuid para la identificación de la query, el cual se propagó por los mensajes. Usando este identificador, tanto el Sum como el AggregationFilter agrupan los resultados por query_id.
+
+#### Múltiples clientes + Sum replicado:
+
+En este caso, a lo implementado anteriormente se sumaron varios cambios:
+
+- Propagación del EOF: al tener múltiples Sum que consumen de la misma cola, solo uno de estos lee el EOF. Para notificar esto a los demás Sum, el lector lo broadcastea por medio de un RabbitMQ Exchange. Este se consume en un trhead a parte, ya que, al ser una operación bloqueante, la concurrencia/paralelismo no se ve perjudicada por el Global Interpreter Lock de Python
+- Query distribuida: Al tener varios Sum, una misma query se ve repartida entre los mismos. Esto presenta un problema: determinar cuándo el AggregationFilter cuenta con la información necesaria para enviar el mensaje al join. Para esto, mantiene la cantidad de EOF recibidos de Sum diferentes para una misma query y recién cuando son igual al MAX_SUM, envia los resultados al Join.
+- EOF de Broadcast recibido mientras se procesan datos de la misma query: Para solucionar esta situación, se agregó un lock para evitar que no se llegue a procesar antes de enviar el EOF. También se agregó una variable para evitar EOF duplicados al aggregationFilter. Esta variable se descarta una vez procesada toda la query.
+
+Esta implementación inicial se realizó con prefetch = 1.
+
+#### Múltiples clientes + Múltiples réplicas:
+
+A lo implementado anteriormente, se sumó una division de palabras según un hash determinístico (cada palabra siempre va a un único AggregationFilter). Además, similar a lo realizado para la sincronización del EOF, el Join espera a recibir tantos tops parciales como AggregationFilter hay, para obtener el top total y devolvérselo al usuario.
+
+#### Implementación sin prefetch=1:
+
+Para esto se tuvieron que realizar varios cambios. Primero que nada, se modificó el middleware para que sea thread-safe (con el prefetch de 1 no se daba el error con la frecuencia suficiente como para observarlo en las pruebas). Para esto se separaron tanto el channel como la connection para el consumer y el publisher, evitando así que 2 threads distintos accedieran al mismo, rompiendo el exchange/queue.
+
+Luego, se cambió completamente el protocolo de sincronización, con el fin de contemplar mensajes procesados por el Sum, enteramente luego del envío del EOF al AggregationFilter. Como los AggregationFilter reciben solo una parte de las palabras, se agregó un campo al EOF con la cantidad total de registros por palabra (para una query en particular), y a cada palabra enviada por un Sum se le sumó la cantidad de registros que conformaron la suma. Con esto, el AggregationFilter puede determinar si una query fue procesada al completo si la cantidad de registros recibidos para cada palabra coincide con el total de la query.
+
+Por otro lado, el Sum, a partir de recibido el EOF para una query, no libera variables y sigue enviando inmediatamente (sin acumular) todos los mensajes procesados pertenecientes a la misma. Esto con el fin de evitar posibles pérdidas de mensajes rezagados luego de la llegada del EOF. Finalmente, el Join, cuando recibe todos los tops parciales de una query, hace un broadcast (por medio del mismo exchange de control utilizado para la propagación de EOF) a todos los Sum para notificar que no llegarán más mensajes para dicha query y que pueden liberar recursos asociados a la misma.
+
+### Arquitectura Final
+
+  #### Coordinación Sum Aggregation:
+  
+  La coordinación se realiza mediante mensajes identificados con un query_id único, permitiendo que múltiples queries puedan procesarse sin interferir. 
+
+  Al finalizar una query con un EOF, el Sum encargado de su lectura lo propaga entre todas las réplicas por medio de un exchange de control, con el fin de que todas las instancias se enteren del final de la consulta.
+
+  Cada AggregationFilter recibe palabras según una función hash determinística, haciendo que una palabra siempre sea procesada por la misma réplica. Para determinar que se tienen todos los datos provenientes de los Sum, se verifican tanto los EOF recibidos como la cantidad de registros recibidos por palabra. Una vez procesada completamente la query, envían su resultado al Join para que devuelva el top general al cliente y notifique a los Sum del cierre de la query (por medio del exchange de control). 
+
+  #### Escalabilidad respecto a Clientes:
+
+  El sistema escala respecto a clientes mediante query_id, permitiendo mantener un estado separado por cliente. De esta forma se pueden procesar de forma concurrente múltiples requests.
+
+  #### Escalabilidad respecto a controladores (Sum/AggregationFilter):
+
+    Escala horizontalmente a medida que se agregan nuevas instancias de Sum, distribuyendo la carga de procesamiento e incrementando la capacidad de trabajo.
+
+    Igualmente, se pueden agregar instancias de AggregationFilter. A diferencia del caso anterior, donde la distribución era "aleatoria", en este caso se realiza por medio de un hash determinístico que matchea cada palabra con una réplica particular, balanceando la carga y permitiendo un mayor procesamiento paralelo.
+
+    En ambos casos, al aumentar la cantidad de réplicas, se mejora el throughput general del sistema.
