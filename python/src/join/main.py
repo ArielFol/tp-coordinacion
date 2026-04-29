@@ -3,6 +3,7 @@ import logging
 import signal
 
 from common import middleware, message_protocol, fruit_item
+from common.fruit_item.fruit_item import FruitItem
 
 MOM_HOST = os.environ["MOM_HOST"]
 INPUT_QUEUE = os.environ["INPUT_QUEUE"]
@@ -47,7 +48,10 @@ class JoinFilter:
         for top in self.partial_top_by_query[query_id].values():
             total.extend(top)
         
-        final_top = sorted(total, key=lambda x: x[1], reverse=True)[:TOP_SIZE]
+        fruits = [FruitItem(fruit, amount) for fruit, amount in total]
+        fruits.sort(reverse=True)
+
+        final_top = [[fruit.fruit, fruit.amount] for fruit in fruits[:TOP_SIZE]]
 
         logging.info(f"Sending final top for query {query_id}")
         self.output_queue.send(message_protocol.internal.serialize({
